@@ -67,7 +67,8 @@ docker compose up --build
 ```
 
 ## Переменные окружения
-
+> ⚠️ Файл `.env` содержит реальные секреты, например `OPENAI_API_KEY`, и добавлен в `.gitignore`.
+> Не коммитьте `.env` в репозиторий. Используйте `.env.example` как шаблон для локальной настройки.
 - `OPENAI_API_KEY` — ключ для OpenAI-compatible API
 - `OPENAI_BASE_URL` — базовый URL провайдера
 - `OPENAI_MODEL` — имя модели
