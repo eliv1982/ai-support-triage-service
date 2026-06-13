@@ -10,3 +10,4 @@ htmlcov/
 .coverage
 dist/
 build/
+submission_assets/
