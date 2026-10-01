@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.models import Ticket
-from app.services.triage_service import TriageService, fallback_response
+from app.services.triage_service import TriageService
 
 
 def build_mock_llm_client(content: str | None = None, error: Exception | None = None):
@@ -117,7 +117,9 @@ def test_rate_limit_returns_429(client):
     assert response.json()["detail"] == "Rate limit exceeded"
 
 
-def test_llm_failure_returns_fallback_and_saves_ticket(client, db_session):
+def test_llm_failure_returns_fallback_and_saves_ticket(
+    client, db_session, expected_failsafe
+):
     service = TriageService(
         llm_client=build_mock_llm_client(error=RuntimeError("LLM unavailable"))
     )
@@ -133,7 +135,7 @@ def test_llm_failure_returns_fallback_and_saves_ticket(client, db_session):
     )
 
     assert response.status_code == 200
-    assert response.json() == fallback_response().model_dump()
+    assert response.json() == expected_failsafe
 
     ticket = db_session.scalar(select(Ticket))
     assert ticket is not None

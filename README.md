@@ -109,9 +109,13 @@ SELECT id, client_id, channel, category, confidence, escalate, error FROM ticket
 
 ## Как запустить тесты
 
+Из корня репозитория, после `pip install -r requirements.txt`:
+
 ```bash
-pytest
+python -m pytest
 ```
+
+Нужен именно `python -m pytest`: так корень репозитория попадает в `sys.path`, и тесты находят пакет `app`. Голый `pytest` на чистом чекауте падает с `ModuleNotFoundError: No module named 'app'`. Тесты не обращаются к сети и не требуют `OPENAI_API_KEY`. Эта же команда запускается в CI.
 
 ## Демо-сценарий для видео
 
