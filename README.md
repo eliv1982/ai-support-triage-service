@@ -44,6 +44,8 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
+Впишите в `.env` свой `OPENAI_API_KEY`. Без него сервис не запустится: ключ обязателен, не может быть пустым или оставаться заглушкой `your_api_key_here` из примера.
+
 4. Запустите приложение:
 
 ```bash
@@ -54,7 +56,7 @@ uvicorn app.main:app --reload
 
 ## Запуск через Docker
 
-1. Подготовьте `.env`:
+1. Подготовьте `.env` и впишите в него свой `OPENAI_API_KEY` (см. выше):
 
 ```bash
 Copy-Item .env.example .env
@@ -66,10 +68,12 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
+Контейнер работает от непривилегированного пользователя. База SQLite лежит в именованном томе `triage-data` (`/data/app.db`), а не в `./app.db` на хосте; данные переживают `docker compose down` и удаляются только вместе с томом (`docker compose down -v`).
+
 ## Переменные окружения
 > ⚠️ Файл `.env` содержит реальные секреты, например `OPENAI_API_KEY`, и добавлен в `.gitignore`.
 > Не коммитьте `.env` в репозиторий. Используйте `.env.example` как шаблон для локальной настройки.
-- `OPENAI_API_KEY` — ключ для OpenAI-compatible API
+- `OPENAI_API_KEY` — ключ для OpenAI-compatible API. Обязателен: пустое значение и заглушка `your_api_key_here` отклоняются при старте. Формат ключа не проверяется, поэтому для сервера без аутентификации подойдет любое другое значение
 - `OPENAI_BASE_URL` — базовый URL провайдера
 - `OPENAI_MODEL` — имя модели
 - `RATE_LIMIT_PER_MINUTE` — лимит запросов в минуту на один `client_id`
@@ -109,13 +113,13 @@ SELECT id, client_id, channel, category, confidence, escalate, error FROM ticket
 
 ## Как запустить тесты
 
-Из корня репозитория, после `pip install -r requirements.txt`:
+Из корня репозитория, после `pip install -r requirements-dev.txt` (он включает `requirements.txt` и добавляет зависимости только для тестов):
 
 ```bash
 python -m pytest
 ```
 
-Нужен именно `python -m pytest`: так корень репозитория попадает в `sys.path`, и тесты находят пакет `app`. Голый `pytest` на чистом чекауте падает с `ModuleNotFoundError: No module named 'app'`. Тесты не обращаются к сети и не требуют `OPENAI_API_KEY`. Эта же команда запускается в CI.
+Нужен именно `python -m pytest`: так корень репозитория попадает в `sys.path`, и тесты находят пакет `app`. Голый `pytest` на чистом чекауте падает с `ModuleNotFoundError: No module named 'app'`. Тесты не обращаются к внешней сети и не требуют `OPENAI_API_KEY`: в них подставляется заведомо фиктивный ключ. `pytest.ini` ограничивает сбор тестов каталогом `tests/`. Эта же команда запускается в CI.
 
 ## Демо-сценарий для видео
 

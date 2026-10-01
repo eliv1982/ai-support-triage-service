@@ -1,6 +1,12 @@
+import os
 import socket
 from collections.abc import Generator
 from types import SimpleNamespace
+
+# Settings rejects a missing/placeholder key at import time, so a fake one must be in
+# place before any app module loads. Overwritten (not setdefault) on purpose: a real key
+# exported in the developer's shell must never reach the test process.
+os.environ["OPENAI_API_KEY"] = "test-key-not-a-real-credential"
 
 import pytest
 from fastapi.testclient import TestClient

@@ -1,0 +1,35 @@
+# Keep local secrets, runtime state and dev junk out of the build context.
+
+# Secrets (the example file holds no secret)
+.env
+.env.*
+!.env.example
+
+# VCS and CI
+.git
+.github
+
+# Virtual environments and caches
+.venv
+venv
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local presentation material (large, not used by the application)
+submission_assets
+
+# Editors and OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db

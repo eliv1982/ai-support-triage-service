@@ -6,4 +6,9 @@ services:
     env_file:
       - .env
     volumes:
-      - ./:/app
+      # SQLite lives here (the image's working directory). A named volume is writable by
+      # the image's non-root user on any host; the old ./:/app bind mount was not.
+      - triage-data:/data
+
+volumes:
+  triage-data:

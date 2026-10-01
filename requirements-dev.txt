@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.1.1
+# Backend of fastapi.testclient (Starlette prefers httpx2 and deprecates httpx).
+httpx2==2.13.1
