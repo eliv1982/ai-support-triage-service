@@ -185,7 +185,7 @@ To look at the stored tickets (the image has no `sqlite3` client, but it has Pyt
 docker compose exec api python -c "import sqlite3; print(sqlite3.connect('/data/app.db').execute('SELECT id, category, escalate, used_fallback, error FROM tickets').fetchall())"
 ```
 
-This Compose file is a convenience for running the demo locally. It is not a hardened deployment: no TLS, no authentication, no health check or resource limits, and port 8000 is published on all host interfaces.
+This Compose file is a convenience for running the demo locally. It is not a hardened deployment: no TLS, no authentication, no health check or resource limits. Port 8000 is published on the host's loopback interface only (`127.0.0.1:8000`), so other machines on the network cannot reach it.
 
 ## Stored data
 
@@ -205,7 +205,7 @@ There is no migration framework. On startup the service creates the table if nee
 
 This is a portfolio/reference demo, not a production support service.
 
-- **No authentication.** Anyone who can reach the port can call `/triage`, which spends provider quota. `client_id` is supplied by the caller and is a label, not an identity: choosing a different one gets a fresh rate-limit allowance. The limiter is a cost and politeness guard, not a security boundary. Run the service on a trusted machine or network; the Compose file publishes the port on all interfaces, so change the mapping to `127.0.0.1:8000:8000` if that matters.
+- **No authentication.** Anyone who can reach the port can call `/triage`, which spends provider quota. `client_id` is supplied by the caller and is a label, not an identity: choosing a different one gets a fresh rate-limit allowance. The limiter is a cost and politeness guard, not a security boundary. Run the service on a trusted machine or network. The Compose file publishes the port on `127.0.0.1` only; if you widen that mapping, anyone who can reach the host can spend your provider quota.
 - **Rate limiter is in-memory and per process.** State is lost on restart and is not shared between workers or containers.
 - **SQLite suits this demo, not a horizontally scaled deployment.** It is a single file with no migration framework.
 - **Ticket text goes to the configured LLM provider** (OpenAI by default). `client_id` does not.

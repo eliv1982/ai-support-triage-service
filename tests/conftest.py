@@ -115,8 +115,8 @@ def expected_failsafe() -> dict:
     return {
         "category": "other",
         "draft_reply": (
-            "Спасибо за обращение. Мы передали его оператору для ручной проверки "
-            "и вернемся с ответом как можно скорее."
+            "Thank you for your message. This request needs review by a member of our "
+            "support team before it can be answered."
         ),
         "confidence": "low",
         "escalate": True,
