@@ -150,7 +150,7 @@ Settings are read from the environment or from a `.env` file in the working dire
 | `OPENAI_API_KEY` | none, required | Provider API key. Startup fails if it is missing, blank, or still the `your_api_key_here` placeholder from `.env.example`. The format is not checked, so any other non-placeholder string works with an OpenAI-compatible local server that does not authenticate |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Chat Completions endpoint |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Model name |
-| `OPENAI_TIMEOUT_SECONDS` | `10` | Timeout for the provider call. There are no retries: a timeout or error goes straight to the fail-safe. Raise it for slower models |
+| `OPENAI_TIMEOUT_SECONDS` | `10` | HTTP timeout for the provider call, applied by the client to each network phase (connect, write, read) rather than as one deadline for the whole call. There are no retries: a timeout or error goes straight to the fail-safe. Raise it for slower models |
 | `RATE_LIMIT_PER_MINUTE` | `5` | Accepted requests per `client_id` in any 60-second window |
 | `DATABASE_URL` | `sqlite:///./app.db` | SQLite file, relative to the working directory. Only SQLite is supported |
 
@@ -213,7 +213,7 @@ This is a portfolio/reference demo, not a production support service.
 - **Logs** contain `client_id`, channel and text length. They do not contain the ticket text or provider error messages.
 - **The reply is a draft.** It should be reviewed by a person before anything reaches a customer. The prompt asks for 1-6 sentences, but that is a request to the model, not something that is validated.
 - **Validation is client-side.** The service uses JSON mode and validates the result itself; it does not use provider-side Structured Outputs.
-- **Throughput is demo-scale.** Each triage call holds a worker thread for as long as the provider call takes, up to the timeout.
+- **Throughput is demo-scale.** Each triage call holds a worker thread for as long as the provider call takes; the timeout is per network phase, not a hard cap on the whole call.
 
 ## Repository structure
 
