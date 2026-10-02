@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned so the runner image does not change under the workflow when `ubuntu-latest`
+    # moves to the next Ubuntu release.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7

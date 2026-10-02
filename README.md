@@ -1,101 +1,84 @@
 # ai-support-triage-service
 
-Учебный MVP-проект для первичной AI-обработки клиентских обращений. Сервис принимает текст обращения, канал и идентификатор клиента, вызывает LLM для простой классификации и черновика ответа, а затем сохраняет результат в SQLite.
+[![CI](https://github.com/eliv1982/ai-support-triage-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eliv1982/ai-support-triage-service/actions/workflows/ci.yml)
 
-## Что делает проект
+A small portfolio/reference demo of **fail-safe LLM-assisted support-ticket triage**: a FastAPI service that asks a chat model for a draft triage of a customer message, validates the answer strictly, and escalates to a human whenever the model or the provider cannot be trusted.
 
-- Принимает обращения через `POST /triage`
-- Классифицирует обращение по категориям `billing`, `support`, `complaint`, `other`
-- Генерирует короткий `draft_reply`
-- Возвращает `confidence` и флаг `escalate`
-- Сохраняет каждое обработанное обращение в таблицу `tickets`. Запрос, отклоненный лимитом (HTTP `429`), обращением не считается и не сохраняется
-- Использует fallback, если LLM недоступна или вернула ответ, не соответствующий схеме. Такая запись помечается `used_fallback = 1`, а причина сохраняется в `error` (см. ниже)
-- Ограничивает частоту запросов по `client_id` (счетчики неактивных клиентов удаляются автоматически)
-- Не передает `client_id` в LLM: модель получает только текст обращения и канал
+It is a demo, not a production helpdesk. See [Limitations](#limitations-security-and-data-handling) for exactly what it does and does not cover.
 
-## Архитектура
+## What it does
 
-- `app/main.py` — FastAPI-приложение и endpoints
-- `app/schemas.py` — Pydantic-схемы запроса и ответа
-- `app/models.py` — SQLAlchemy-модель `tickets`
-- `app/database.py` — подключение к SQLite, создание и обновление схемы (`init_db`)
-- `app/services/triage_service.py` — вызов LLM, парсинг, fallback
-- `app/rate_limiter.py` — простой in-memory rate limiter
-- `app/repository.py` — сохранение тикетов в БД
-- `tests/` — pytest-тесты
+`POST /triage` takes a ticket text, a channel and a caller-supplied `client_id`, and returns a **draft** triage result:
 
-## Локальный запуск
+- a `category`: `billing`, `support`, `complaint` or `other`;
+- a short `draft_reply`;
+- a `confidence`: `high`, `medium` or `low`;
+- an `escalate` flag.
 
-1. Создайте и активируйте виртуальное окружение:
+Every triaged ticket is stored in SQLite. Nothing is sent to the customer and no support action is executed: the result is meant to be reviewed by a person.
 
-```bash
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+If the provider fails, times out, or returns something that does not match the expected schema, the service does not guess. It returns a fixed fail-safe result (`other`, `low` confidence, `escalate: true`) and records that it did so.
+
+## Key engineering ideas
+
+- **Model output is treated as untrusted.** JSON mode is requested, but the reply is still parsed and validated against a strict Pydantic model: exact keys, no extra keys, no type coercion (the string `"false"` is not a boolean), enum-checked `category` and `confidence`, non-empty `draft_reply`. Anything else falls back.
+- **Fail-safe, not fail-open.** Provider error, timeout and invalid output all end in the same escalating result, so a failure costs one manual review instead of a wrong automatic answer.
+- **Provenance is recorded.** Each row has `used_fallback` and, for fallbacks, a stable `error` code (`provider_error`, `provider_timeout`, `invalid_llm_json`, `invalid_llm_schema`). Raw SDK exception text is never stored or logged, since provider messages can quote credentials or the ticket itself.
+- **Bounded provider calls.** Explicit timeout (`OPENAI_TIMEOUT_SECONDS`), SDK retries disabled, one OpenAI client reused for the whole process.
+- **Minimal prompt.** The model receives only the ticket text and the channel. `client_id` is a local rate-limit key and is not sent.
+- **Local rate limiting.** Thread-safe sliding window per `client_id`; idle clients are evicted lazily, so memory follows recently active clients rather than every id ever seen. Rejected requests never reach the provider and are not stored.
+- **Responsive under load.** Triage is a synchronous endpoint running in the worker thread pool; `/health` is not, and a test checks it still answers while every worker is busy with triage.
+- **Testable without a network.** The triage service, rate limiter and DB session are injected. API tests use a fake LLM client, a fixture blocks non-loopback sockets, and a loopback stub provider exercises the real SDK transport (timeouts, no retries, error statuses).
+- **Plain operations.** Exactly pinned dependencies, a non-root Docker image, and CI that runs the suite on every push and pull request.
+
+## Request flow
+
+```text
+Client
+  |  POST /triage  {text, channel, client_id}
+  v
+FastAPI request validation ---------- invalid ------> 422
+  v
+In-memory rate limiter (per client_id) -- over limit -> 429   (nothing stored)
+  v
+TriageService  --- text + channel only --->  OpenAI-compatible Chat Completions
+  v
+Strict Pydantic validation of the model's JSON
+  |-- valid -----------------------------------------> model's triage
+  '-- provider error / timeout / invalid output -----> fail-safe triage (escalate: true)
+  v
+SQLite: one `tickets` row  (used_fallback, error code)
+  v
+200  {category, draft_reply, confidence, escalate}
 ```
 
-2. Установите зависимости:
+## API
+
+### `POST /triage`
+
+| Field | Type | Constraints |
+| --- | --- | --- |
+| `text` | string | 1-2000 characters after surrounding whitespace is trimmed; blank text is rejected |
+| `channel` | string | `email`, `form` or `chat` |
+| `client_id` | string | 1-128 characters, one visible token: no spaces, control characters or invisible characters. UUIDs, e-mail addresses and ids like `acme:user.42` are fine. It is a label for rate limiting, **not** authentication |
+
+POSIX shells:
 
 ```bash
-pip install -r requirements.txt
+curl -X POST http://127.0.0.1:8000/triage \
+  -H "Content-Type: application/json" \
+  -d '{"text": "I was charged twice for my last invoice.", "channel": "email", "client_id": "client-123"}'
 ```
 
-3. Создайте `.env` на основе примера:
+PowerShell:
 
-```bash
-Copy-Item .env.example .env
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/triage `
+  -ContentType "application/json" `
+  -Body '{"text": "I was charged twice for my last invoice.", "channel": "email", "client_id": "client-123"}'
 ```
 
-Впишите в `.env` свой `OPENAI_API_KEY`. Без него сервис не запустится: ключ обязателен, не может быть пустым или оставаться заглушкой `your_api_key_here` из примера.
-
-4. Запустите приложение:
-
-```bash
-uvicorn app.main:app --reload
-```
-
-После запуска сервис будет доступен на `http://127.0.0.1:8000`, а health-check — на `GET /health`.
-
-## Запуск через Docker
-
-1. Подготовьте `.env` и впишите в него свой `OPENAI_API_KEY` (см. выше):
-
-```bash
-Copy-Item .env.example .env
-```
-
-2. Запустите контейнер:
-
-```bash
-docker compose up --build
-```
-
-Контейнер работает от непривилегированного пользователя. База SQLite лежит в именованном томе `triage-data` (`/data/app.db`), а не в `./app.db` на хосте; данные переживают `docker compose down` и удаляются только вместе с томом (`docker compose down -v`).
-
-## Переменные окружения
-> ⚠️ Файл `.env` содержит реальные секреты, например `OPENAI_API_KEY`, и добавлен в `.gitignore`.
-> Не коммитьте `.env` в репозиторий. Используйте `.env.example` как шаблон для локальной настройки.
-- `OPENAI_API_KEY` — ключ для OpenAI-compatible API. Обязателен: пустое значение и заглушка `your_api_key_here` отклоняются при старте. Формат ключа не проверяется, поэтому для сервера без аутентификации подойдет любое другое значение
-- `OPENAI_BASE_URL` — базовый URL провайдера
-- `OPENAI_MODEL` — имя модели
-- `OPENAI_TIMEOUT_SECONDS` — сколько секунд ждать ответ провайдера (по умолчанию `10`). Повторов нет: при таймауте или ошибке сразу возвращается ответ с эскалацией. Для более медленных моделей значение можно увеличить
-- `RATE_LIMIT_PER_MINUTE` — лимит запросов в минуту на один `client_id`
-- `DATABASE_URL` — строка подключения к SQLite, по умолчанию `sqlite:///./app.db`
-
-## Требования к запросу
-
-- `text` — от 1 до 2000 символов. Пробелы по краям обрезаются (и в БД, и в запросе к LLM), поэтому пустой текст и текст из одних пробелов отклоняются с HTTP `422`
-- `channel` — `email`, `form` или `chat`
-- `client_id` — от 1 до 128 символов, без пробелов и управляющих символов (перевод строки, ESC, невидимые форматирующие символы). Буквы любого алфавита, цифры и знаки `_ - . : @ +` допустимы, так что подходят UUID, e-mail и идентификаторы вида `acme:user.42`. Это только метка для лимита запросов, а не аутентификация
-
-Ответ модели проверяется строго: `escalate` должен быть настоящим JSON-boolean (`"false"`, `"yes"`, `0` и `1` не принимаются), лишние ключи недопустимы. Любое отклонение от схемы приводит к fallback-ответу с эскалацией.
-
-## Пример запроса
-
-```bash
-curl.exe -X POST "http://127.0.0.1:8000/triage" -H "Content-Type: application/json" -d "{\"text\":\"I was charged twice for my last invoice.\",\"channel\":\"email\",\"client_id\":\"client-123\"}"
-```
-
-Пример ответа:
+Example response (the wording is model-generated and will vary):
 
 ```json
 {
@@ -106,54 +89,157 @@ curl.exe -X POST "http://127.0.0.1:8000/triage" -H "Content-Type: application/js
 }
 ```
 
-## Как посмотреть SQLite database
+This is a **draft triage result**, not an executed support action. On a normal result `escalate` is the model's judgement; the service itself only forces it to `true` on the fail-safe path. The response does not say whether the fail-safe was used; that is recorded in the database (see [Stored data](#stored-data)).
 
-Если установлен клиент `sqlite3`, можно открыть базу так:
+### `GET /health`
+
+Returns `{"status": "ok"}` while the process is up and serving requests. It is a liveness check only: it does not touch the database and does not call the provider, so it is not a readiness probe for either.
+
+FastAPI's interactive docs are served at `/docs`.
+
+### Behaviour
+
+| Situation | HTTP | Stored as a ticket | Fail-safe used |
+| --- | --- | --- | --- |
+| Valid model result | 200 | yes | no (`used_fallback = 0`) |
+| Provider error or timeout | 200, fail-safe result | yes | yes (`provider_error` / `provider_timeout`) |
+| Invalid model output (not JSON, or wrong schema) | 200, fail-safe result | yes | yes (`invalid_llm_json` / `invalid_llm_schema`) |
+| Request validation failure | 422 | no | n/a, provider not called |
+| Rate limit exceeded | 429 `{"detail": "Rate limit exceeded"}` | no | n/a, provider not called |
+
+The fail-safe result is category `other`, confidence `low`, `escalate: true`, with a fixed holding message as the draft reply. That message is currently Russian ("Thank you for your request. We have passed it to an operator for manual review and will reply as soon as possible."), a leftover from the original demo, while the prompt and everything else are English.
+
+## Local setup
+
+Requires Python 3.11 or newer. CI and the Docker image use 3.11, which is the only version the project is tested on.
+
+POSIX shells (macOS/Linux):
 
 ```bash
-sqlite3 app.db
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt          # enough to run the service
+pip install -r requirements-dev.txt      # also installs the test dependencies
+cp .env.example .env
 ```
 
-Полезные команды внутри:
+PowerShell (Windows):
 
-```sql
-.tables
-SELECT id, client_id, channel, category, confidence, escalate, used_fallback, error FROM tickets;
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt          # enough to run the service
+pip install -r requirements-dev.txt      # also installs the test dependencies
+Copy-Item .env.example .env
 ```
 
-`used_fallback` равен `1`, если сохранен fail-safe ответ, а не ответ модели (по содержимому их не отличить: модель может ответить так же). В `error` лежит стабильный код причины, а не текст исключения; для обычного ответа там `NULL`:
+Edit `.env` and set `OPENAI_API_KEY`, then start the service (same command in both shells):
 
-| `error` | Причина |
-| --- | --- |
-| `provider_error` | сбой или ошибка провайдера |
-| `provider_timeout` | провайдер не ответил за `OPENAI_TIMEOUT_SECONDS` |
-| `invalid_llm_json` | ответ модели не является JSON |
-| `invalid_llm_schema` | JSON не соответствует схеме (в том числе `escalate` не boolean или есть лишние ключи) |
+```bash
+uvicorn app.main:app
+```
 
-### База, созданная более ранней версией
+It listens on `http://127.0.0.1:8000`. Check it with `GET /health`, then send the request from the [API](#post-triage) section.
 
-Миграций нет: при старте сервис сам добавляет колонку `used_fallback` в существующую таблицу `tickets`. Ничего не удаляется и не переписывается; старые записи с непустым `error` получают `used_fallback = 1`. Старые записи остаются как были: в них может быть сырой текст ошибок провайдера и запись `Rate limit exceeded` от прежнего поведения. Для чистого старта удалите `app.db` (в Docker: `docker compose down -v`).
+## Configuration
 
-## Как запустить тесты
+Settings are read from the environment or from a `.env` file in the working directory. `.env` is git-ignored and excluded from the Docker build context; never commit it.
 
-Из корня репозитория, после `pip install -r requirements-dev.txt` (он включает `requirements.txt` и добавляет зависимости только для тестов):
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | none, required | Provider API key. Startup fails if it is missing, blank, or still the `your_api_key_here` placeholder from `.env.example`. The format is not checked, so any other non-placeholder string works with an OpenAI-compatible local server that does not authenticate |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Chat Completions endpoint |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Model name |
+| `OPENAI_TIMEOUT_SECONDS` | `10` | Timeout for the provider call. There are no retries: a timeout or error goes straight to the fail-safe. Raise it for slower models |
+| `RATE_LIMIT_PER_MINUTE` | `5` | Accepted requests per `client_id` in any 60-second window |
+| `DATABASE_URL` | `sqlite:///./app.db` | SQLite file, relative to the working directory. Only SQLite is supported |
+
+## Testing
 
 ```bash
 python -m pytest
 ```
 
-Нужен именно `python -m pytest`: так корень репозитория попадает в `sys.path`, и тесты находят пакет `app`. Голый `pytest` на чистом чекауте падает с `ModuleNotFoundError: No module named 'app'`. Тесты не обращаются к внешней сети и не требуют `OPENAI_API_KEY`: в них подставляется заведомо фиктивный ключ. `pytest.ini` ограничивает сбор тестов каталогом `tests/`. Эта же команда запускается в CI.
+Run it from the repository root after `pip install -r requirements-dev.txt`. Use `python -m pytest`, not bare `pytest`: the former puts the repository root on `sys.path`, and a bare `pytest` fails with `ModuleNotFoundError: No module named 'app'`.
 
-## Демо-сценарий для видео
+The tests need no real API key and make no external network calls: the test setup substitutes a fake key, replaces the LLM client, and refuses non-loopback connections. `pytest.ini` limits collection to `tests/`. CI runs the same command on Python 3.11.
 
-1. Запустить сервис локально или через Docker
-2. Проверить `GET /health`
-3. Отправить успешный запрос на `POST /triage`
-4. Показать ответ API
-5. Открыть `app.db` и показать сохраненную запись в `tickets`
-6. Временно сломать или замокать LLM и показать fallback-поведение
-7. Отправить несколько запросов подряд с одним `client_id` и показать HTTP `429` (в `tickets` отклоненный запрос не попадает)
+## Docker
 
-## Примечание
+```bash
+cp .env.example .env          # PowerShell: Copy-Item .env.example .env
+# set OPENAI_API_KEY in .env
+docker compose up --build
+```
 
-Основной endpoint проекта — `POST /triage`. Если в шаблоне задания встречается `POST /lead`, это техническая опечатка, и ориентироваться нужно именно на `POST /triage`.
+The service is then on `http://127.0.0.1:8000`.
+
+- The container runs as an unprivileged user (uid 10001). The application code in `/app` is baked into the image and is not bind-mounted from the host.
+- SQLite lives under `/data` (`/data/app.db`), in the named volume `triage-data`, so data survives `docker compose down`. `docker compose down -v` deletes it.
+- `.dockerignore` keeps `.env`, `*.db`, `.git`, virtual environments and caches out of the image.
+- Compose reads `OPENAI_API_KEY` and the other settings from your `.env`.
+
+To look at the stored tickets (the image has no `sqlite3` client, but it has Python):
+
+```bash
+docker compose exec api python -c "import sqlite3; print(sqlite3.connect('/data/app.db').execute('SELECT id, category, escalate, used_fallback, error FROM tickets').fetchall())"
+```
+
+This Compose file is a convenience for running the demo locally. It is not a hardened deployment: no TLS, no authentication, no health check or resource limits, and port 8000 is published on all host interfaces.
+
+## Stored data
+
+Each triaged ticket is one row in the `tickets` table: `id`, `created_at`, `client_id`, `channel`, `text`, the four result fields, `error` and `used_fallback`.
+
+`used_fallback` is `1` when the stored result is the fail-safe rather than the model's answer. Content alone cannot tell them apart, because a model may answer exactly like the fail-safe. For fallbacks, `error` holds the stable reason code listed in the [Behaviour](#behaviour) table; it is `NULL` for normal results and never contains provider text.
+
+To inspect a local database (works in any shell, no `sqlite3` client needed):
+
+```bash
+python -c "import sqlite3; print(sqlite3.connect('app.db').execute('SELECT id, client_id, category, escalate, used_fallback, error FROM tickets').fetchall())"
+```
+
+There is no migration framework. On startup the service creates the table if needed and, for a database made by an earlier version, adds the `used_fallback` column in place (rows with a non-empty `error` are marked `used_fallback = 1`). Nothing is deleted or rewritten, so older rows keep whatever they held, including raw provider error text from earlier versions.
+
+## Limitations, security and data handling
+
+This is a portfolio/reference demo, not a production support service.
+
+- **No authentication.** Anyone who can reach the port can call `/triage`, which spends provider quota. `client_id` is supplied by the caller and is a label, not an identity: choosing a different one gets a fresh rate-limit allowance. The limiter is a cost and politeness guard, not a security boundary. Run the service on a trusted machine or network; the Compose file publishes the port on all interfaces, so change the mapping to `127.0.0.1:8000:8000` if that matters.
+- **Rate limiter is in-memory and per process.** State is lost on restart and is not shared between workers or containers.
+- **SQLite suits this demo, not a horizontally scaled deployment.** It is a single file with no migration framework.
+- **Ticket text goes to the configured LLM provider** (OpenAI by default). `client_id` does not.
+- **Ticket data is stored locally in plain SQLite**: `client_id`, ticket text and the generated reply. There is no automatic PII redaction and no retention or deletion policy.
+- **Logs** contain `client_id`, channel and text length. They do not contain the ticket text or provider error messages.
+- **The reply is a draft.** It should be reviewed by a person before anything reaches a customer. The prompt asks for 1-6 sentences, but that is a request to the model, not something that is validated.
+- **Validation is client-side.** The service uses JSON mode and validates the result itself; it does not use provider-side Structured Outputs.
+- **Throughput is demo-scale.** Each triage call holds a worker thread for as long as the provider call takes, up to the timeout.
+
+## Repository structure
+
+```text
+app/
+  main.py               FastAPI app: /health and /triage
+  schemas.py            request/response models and the strict LLM-output model
+  config.py             settings and API-key startup validation
+  services/
+    triage_service.py   prompt, provider call, output validation, fail-safe
+    llm_client.py       OpenAI client factory (explicit timeout, no retries)
+  rate_limiter.py       in-memory sliding-window limiter
+  database.py           engine, session, init_db (create + additive upgrade)
+  models.py             SQLAlchemy `tickets` table
+  repository.py         save_ticket
+  dependencies.py       process-wide service and limiter providers
+  logging_config.py     logging setup
+tests/                  network-free pytest suite (fake LLM client, loopback provider stub)
+Dockerfile              non-root image
+docker-compose.yml      local demo run with a named data volume
+.github/workflows/ci.yml
+requirements.txt        runtime dependencies (pinned)
+requirements-dev.txt    runtime + test dependencies
+.env.example            configuration template (contains no secret)
+```
+
+## Possible next steps
+
+Not implemented, and not needed for the demo: an endpoint to list and review stored tickets, authentication, an English (or localised) fail-safe message, schema migrations, and a shared rate-limit store for multi-process deployments.

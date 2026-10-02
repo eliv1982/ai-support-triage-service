@@ -14,8 +14,8 @@ def test_external_connections_are_blocked():
 
 def test_bare_pytest_collects_only_the_tests_directory(pytestconfig):
     # Collection imports modules, and the network guard is a per-test fixture that does
-    # not run then. A stray local script such as submission_assets/test_voices.py once
-    # made real, paid OpenAI calls at import time under a bare `python -m pytest`.
+    # not run then. A stray local script once made real, paid OpenAI calls at import time
+    # under a bare `python -m pytest`.
     assert pytestconfig.getini("testpaths") == ["tests"]
 
 
