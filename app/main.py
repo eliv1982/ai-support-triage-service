@@ -24,7 +24,7 @@ app = FastAPI(title="ai-support-triage-service", version="0.1.0", lifespan=lifes
 
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
+async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 

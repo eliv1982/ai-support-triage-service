@@ -22,5 +22,4 @@ def save_ticket(
     )
     db.add(ticket)
     db.commit()
-    db.refresh(ticket)
     return ticket

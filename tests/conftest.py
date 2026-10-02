@@ -20,6 +20,7 @@ from app.dependencies import get_rate_limiter, get_triage_service
 from app.main import app
 from app.rate_limiter import InMemoryRateLimiter
 from app.services.triage_service import TriageService
+from provider_stub import ProviderStub
 
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -71,6 +72,19 @@ class FakeLLMClient:
             raise self._error
         message = SimpleNamespace(content=self._content)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+@pytest.fixture
+def provider_stub(monkeypatch: pytest.MonkeyPatch):
+    """A loopback Chat Completions server: set .status/.delay/.retry_after, read .attempts."""
+    # A developer's proxy settings must not divert loopback traffic.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    stub = ProviderStub()
+    try:
+        yield stub
+    finally:
+        stub.close()
 
 
 @pytest.fixture

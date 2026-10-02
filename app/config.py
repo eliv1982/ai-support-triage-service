@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The value shipped in .env.example. A copied-but-unedited .env must not start the app.
@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    # Seconds one provider call may take before the fail-safe response is used. Roughly 3x
+    # what the default model needs for this short JSON task; raise it for slower models.
+    openai_timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     rate_limit_per_minute: int = 5
     database_url: str = "sqlite:///./app.db"
 
