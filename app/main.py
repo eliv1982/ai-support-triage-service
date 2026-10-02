@@ -4,19 +4,19 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.database import Base, engine, get_db
+from app.database import engine, get_db, init_db
 from app.dependencies import get_rate_limiter, get_triage_service
 from app.logging_config import setup_logging
 from app.repository import save_ticket
 from app.schemas import HealthResponse, TriageRequest, TriageResponse
-from app.services.triage_service import TriageService, fallback_response
+from app.services.triage_service import TriageService
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    init_db(engine)
     yield
 
 
@@ -43,19 +43,20 @@ def triage(
     )
 
     if not rate_limiter.allow(payload.client_id):
+        # Rejected before triage, so it is not a ticket: nothing is stored and the provider
+        # is never called. (client_id is validated, so it cannot carry a newline into the log.)
         logger.warning("Rate limit exceeded for client_id=%s", payload.client_id)
-        fallback = fallback_response()
-        save_ticket(
-            db=db,
-            payload=payload,
-            result=fallback,
-            error="Rate limit exceeded",
-        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded",
         )
 
     result = triage_service.triage(payload)
-    save_ticket(db=db, payload=payload, result=result.response, error=result.error)
+    save_ticket(
+        db=db,
+        payload=payload,
+        result=result.response,
+        error=result.error,
+        used_fallback=result.used_fallback,
+    )
     return result.response

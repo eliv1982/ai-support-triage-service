@@ -65,6 +65,7 @@ def test_successful_triage_with_mocked_llm(client, db_session):
     assert ticket is not None
     assert ticket.category == "support"
     assert ticket.error is None
+    assert ticket.used_fallback is False
 
 
 def test_validation_error_for_empty_text(client):
@@ -95,7 +96,7 @@ def test_validation_error_for_invalid_channel(client):
     assert response.status_code == 422
 
 
-def test_rate_limit_returns_429(client):
+def test_rate_limit_returns_429(client, db_session):
     service = TriageService(
         llm_client=build_mock_llm_client(
             content='{"category":"support","draft_reply":"We will review your request.","confidence":"medium","escalate":false}'
@@ -115,6 +116,8 @@ def test_rate_limit_returns_429(client):
 
     assert response.status_code == 429
     assert response.json()["detail"] == "Rate limit exceeded"
+    # Only the two accepted requests are tickets; a rejected request is not triaged.
+    assert len(db_session.scalars(select(Ticket)).all()) == 2
 
 
 def test_llm_failure_returns_fallback_and_saves_ticket(
@@ -140,4 +143,6 @@ def test_llm_failure_returns_fallback_and_saves_ticket(
     ticket = db_session.scalar(select(Ticket))
     assert ticket is not None
     assert ticket.category == "other"
-    assert ticket.error == "LLM unavailable"
+    # A stable reason code, not the exception text ("LLM unavailable").
+    assert ticket.error == "provider_error"
+    assert ticket.used_fallback is True

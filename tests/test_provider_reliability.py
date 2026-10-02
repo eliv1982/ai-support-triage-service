@@ -5,6 +5,7 @@ provider is ever contacted. The stub's `attempts` counter is the ground truth fo
 many requests the SDK actually sent.
 """
 
+import json
 import socket
 import threading
 import time
@@ -19,7 +20,7 @@ from app.dependencies import get_rate_limiter, get_triage_service
 from app.main import app
 from app.schemas import TriageRequest
 from app.services import llm_client, triage_service
-from app.services.triage_service import TriageService
+from app.services.triage_service import FailureReason, TriageService
 
 PAYLOAD = TriageRequest(text="I was charged twice", channel="email", client_id="client-1")
 
@@ -84,7 +85,9 @@ def test_retryable_upstream_errors_are_attempted_once_then_fail_safe(
     assert provider_stub.attempts == 1
     assert result.used_fallback is True
     assert result.response.model_dump() == expected_failsafe
-    assert str(status) in result.error
+    # The category is stable; the SDK's wording (which includes the status) is not stored.
+    assert result.error == FailureReason.PROVIDER_ERROR
+    assert str(status) not in result.error
 
 
 def test_retry_after_header_does_not_hold_a_worker_thread(
@@ -135,6 +138,7 @@ def test_connection_failures_are_not_retried_either(monkeypatch, expected_failsa
     assert len(accepted) == 1
     assert result.used_fallback is True
     assert result.response.model_dump() == expected_failsafe
+    assert result.error == FailureReason.PROVIDER_ERROR  # a dropped connection is not a timeout
 
 
 # --- a stalled provider is cut off ---------------------------------------------------
@@ -153,10 +157,41 @@ def test_stalled_provider_fails_within_the_configured_timeout(
     assert provider_stub.attempts == 1  # a timeout is not retried
     assert result.used_fallback is True
     assert result.response.model_dump() == expected_failsafe
-    assert "timed out" in result.error.lower()
+    assert result.error == FailureReason.PROVIDER_TIMEOUT
     # Bounds are loose on purpose: it waited for the timeout, and nowhere near the SDK's
     # 600 s default (or a retry on top of it).
     assert 0.4 <= elapsed < 5
+
+
+# --- what actually goes over the wire ------------------------------------------------
+
+
+def test_outbound_http_request_carries_the_ticket_but_not_the_client_id(
+    provider_stub, monkeypatch
+):
+    """Asserted on the bytes the real SDK transport sends, not on the arguments handed to
+    it: nothing the SDK adds (headers, extra body fields) may carry the local identity."""
+    service = real_service(provider_stub.base_url, monkeypatch)
+    payload = TriageRequest(
+        text="Мне дважды списали оплату.", channel="form", client_id="tenant-ZZ-4711"
+    )
+
+    result = service.triage(payload)
+
+    assert result.used_fallback is False  # the stub answered; this was a normal triage
+    (request,) = provider_stub.requests
+    raw_body = request["body"].decode("utf-8")
+    assert "tenant-ZZ-4711" not in raw_body
+    assert "client_id" not in raw_body
+    assert not any("tenant-ZZ-4711" in value for value in request["headers"].values())
+    body = json.loads(raw_body)
+    user_message = body["messages"][1]
+    assert user_message["role"] == "user"
+    assert json.loads(user_message["content"]) == {
+        "text": "Мне дважды списали оплату.",
+        "channel": "form",
+    }
+    assert body["response_format"] == {"type": "json_object"}
 
 
 # --- the client is built once -------------------------------------------------------

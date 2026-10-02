@@ -9,6 +9,7 @@ def save_ticket(
     payload: TriageRequest,
     result: TriageResponse,
     error: str | None = None,
+    used_fallback: bool = False,
 ) -> Ticket:
     ticket = Ticket(
         client_id=payload.client_id,
@@ -19,6 +20,7 @@ def save_ticket(
         escalate=result.escalate,
         draft_reply=result.draft_reply,
         error=error,
+        used_fallback=used_fallback,
     )
     db.add(ticket)
     db.commit()

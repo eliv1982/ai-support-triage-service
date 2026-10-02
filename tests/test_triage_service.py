@@ -1,13 +1,17 @@
 import json
 from typing import get_args
 
+import httpx2
+import openai
 import pytest
 
-from app.schemas import Category, Confidence, TriageRequest, TriageResponse
-from app.services.triage_service import fallback_response
+from app.schemas import Category, Confidence, LLMTriageOutput, TriageRequest, TriageResponse
+from app.services.triage_service import FailureReason, fallback_response
 
-INVALID_JSON = "Invalid JSON returned by LLM"
-SCHEMA_MISMATCH = "LLM response did not match schema"
+INVALID_JSON = FailureReason.INVALID_LLM_JSON
+SCHEMA_MISMATCH = FailureReason.INVALID_LLM_SCHEMA
+PROVIDER_ERROR = FailureReason.PROVIDER_ERROR
+PROVIDER_TIMEOUT = FailureReason.PROVIDER_TIMEOUT
 
 PAYLOAD = TriageRequest(
     text="I was charged twice for invoice #123.",
@@ -48,22 +52,63 @@ def test_fallback_response_is_the_literal_escalating_failsafe(expected_failsafe)
     assert fallback_response().model_dump() == expected_failsafe
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        pytest.param(RuntimeError("LLM unavailable"), id="runtime-error"),
-        pytest.param(TimeoutError("request timed out"), id="timeout"),
-        pytest.param(ConnectionError("connection refused"), id="connection"),
-    ],
-)
+SDK_REQUEST = httpx2.Request("POST", "http://127.0.0.1/v1/chat/completions")
+
+# The stored reason is a category, never the exception's own text (see FailureReason).
+PROVIDER_FAILURES = [
+    pytest.param(RuntimeError("LLM unavailable"), PROVIDER_ERROR, id="runtime-error"),
+    pytest.param(ConnectionError("connection refused"), PROVIDER_ERROR, id="connection"),
+    pytest.param(TimeoutError("request timed out"), PROVIDER_TIMEOUT, id="timeout"),
+    pytest.param(
+        openai.APITimeoutError(request=SDK_REQUEST), PROVIDER_TIMEOUT, id="sdk-timeout"
+    ),
+    pytest.param(
+        openai.APIConnectionError(request=SDK_REQUEST), PROVIDER_ERROR, id="sdk-connection"
+    ),
+    pytest.param(
+        openai.AuthenticationError(
+            "Incorrect API key provided",
+            response=httpx2.Response(401, request=SDK_REQUEST),
+            body=None,
+        ),
+        PROVIDER_ERROR,
+        id="sdk-status-error",
+    ),
+]
+
+
+@pytest.mark.parametrize("error, reason", PROVIDER_FAILURES)
 def test_provider_failure_returns_escalating_failsafe(
-    fake_llm, make_service, expected_failsafe, error
+    fake_llm, make_service, expected_failsafe, error, reason
 ):
     service = make_service(fake_llm(error=error))
 
     result = service.triage(PAYLOAD)
 
-    assert_failsafe(result, expected_failsafe, error=str(error))
+    assert_failsafe(result, expected_failsafe, error=reason)
+
+
+def test_provider_exception_text_is_not_part_of_the_result(
+    fake_llm, make_service, expected_failsafe
+):
+    secret = "Incorrect API key provided: sk-proj-SECRET1234 (request req_abc)"
+    service = make_service(fake_llm(error=RuntimeError(secret)))
+
+    result = service.triage(PAYLOAD)
+
+    assert_failsafe(result, expected_failsafe, error=PROVIDER_ERROR)
+    assert "SECRET" not in str(result.error)
+    assert "SECRET" not in repr(result)
+
+
+def test_failure_reasons_are_the_stable_strings_that_get_stored():
+    # These values are persisted in tickets.error, so renaming one is a data change.
+    assert {reason.value for reason in FailureReason} == {
+        "provider_error",
+        "provider_timeout",
+        "invalid_llm_json",
+        "invalid_llm_schema",
+    }
 
 
 # --- B. Malformed / unusable LLM output ----------------------------------------
@@ -98,6 +143,30 @@ UNUSABLE_OUTPUTS = [
     pytest.param(
         json.dumps(valid_output(escalate="maybe")), SCHEMA_MISMATCH, id="non-boolean-escalate"
     ),
+    # Lax validation would turn each of these into a real boolean. For model output the
+    # prompt demands a boolean, so anything else is drift and must fail safe instead.
+    pytest.param(
+        json.dumps(valid_output(escalate="false")), SCHEMA_MISMATCH, id="string-false-escalate"
+    ),
+    pytest.param(
+        json.dumps(valid_output(escalate="true")), SCHEMA_MISMATCH, id="string-true-escalate"
+    ),
+    pytest.param(
+        json.dumps(valid_output(escalate="yes")), SCHEMA_MISMATCH, id="string-yes-escalate"
+    ),
+    pytest.param(json.dumps(valid_output(escalate=0)), SCHEMA_MISMATCH, id="zero-escalate"),
+    pytest.param(json.dumps(valid_output(escalate=1)), SCHEMA_MISMATCH, id="one-escalate"),
+    pytest.param(
+        json.dumps(valid_output(extra_key="x")), SCHEMA_MISMATCH, id="extra-key"
+    ),
+    pytest.param(
+        json.dumps(valid_output(reasoning="the customer is upset")),
+        SCHEMA_MISMATCH,
+        id="extra-key-with-prose",
+    ),
+    # json.loads raises RecursionError (not JSONDecodeError) for absurd nesting; it must
+    # still fail safe rather than escape as an HTTP 500.
+    pytest.param("[" * 100_000, INVALID_JSON, id="deeply-nested-json"),
     pytest.param(
         json.dumps(valid_output(escalate=None)), SCHEMA_MISMATCH, id="null-escalate"
     ),
@@ -135,6 +204,11 @@ def test_valid_llm_output_is_passed_through_without_fallback(
     assert result.response.model_dump() == output
 
 
+def test_llm_output_schema_has_exactly_the_public_response_fields():
+    # The strict model is only a stricter view of the public one: same keys, same enums.
+    assert LLMTriageOutput.model_fields.keys() == TriageResponse.model_fields.keys()
+
+
 # --- E. Outbound LLM request contract ------------------------------------------
 
 
@@ -165,11 +239,29 @@ def test_request_sends_system_prompt_then_ticket_as_user_message(fake_llm, make_
     system_message, user_message = llm.calls[0]["messages"]
     assert system_message["role"] == "system"
     assert user_message["role"] == "user"
-    # client_id is deliberately not asserted: whether it should reach the provider is
-    # a separate, later decision and this suite must not fight it.
-    sent = json.loads(user_message["content"])
-    assert sent["text"] == payload.text
-    assert sent["channel"] == "chat"
+    # Exactly the ticket content the model needs, and nothing else.
+    assert json.loads(user_message["content"]) == {"text": payload.text, "channel": "chat"}
+
+
+def test_client_id_never_reaches_the_provider(fake_llm, make_service):
+    llm = fake_llm(content=json.dumps(valid_output()))
+    service = make_service(llm)
+    payload = TriageRequest(
+        text="I was charged twice.", channel="form", client_id="tenant-ZZ-4711"
+    )
+
+    service.triage(payload)
+
+    # Everything handed to the SDK call (model, messages, prompt, parameters), not just
+    # the user message.
+    sent = json.dumps(llm.calls[0], ensure_ascii=False)
+    assert "tenant-ZZ-4711" not in sent
+    assert "client_id" not in sent
+    # The ticket itself still gets through.
+    assert json.loads(llm.calls[0]["messages"][1]["content"]) == {
+        "text": "I was charged twice.",
+        "channel": "form",
+    }
 
 
 def test_system_prompt_states_the_response_contract_the_schema_enforces(fake_llm, make_service):

@@ -115,13 +115,12 @@ def test_real_sdk_client_sends_the_expected_chat_completions_request(
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
+            # The ticket and its channel only: client_id is a local rate-limit key and is
+            # deliberately not part of the provider request.
             "content": json.dumps(
-                {
-                    "text": "I was charged twice",
-                    "channel": "email",
-                    "client_id": "client-1",
-                },
+                {"text": "I was charged twice", "channel": "email"},
                 ensure_ascii=False,
             ),
         },
     ]
+    assert "client-1" not in json.dumps(body)
